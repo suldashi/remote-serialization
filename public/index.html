@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            line-height: 1.5em;
+        }
+        .container {
+            width: 800px;
+        }
+        code {
+            color: darkblue;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Remote object access</h1>
+        <h2>More than simple <code>JSON.stringify</code> back and forth</h2>
+        <p>To access objects in different contexts, it's necessary to transform
+            the remote object into a form that's easy to transport, and then back again into
+            usable local form. This process is called serialization and deserialization.
+            Currently, the preferred form of serialization is <code>JSON.stringify</code> and 
+            ' counterpart <code>JSON.parse</code>. This process is adequate for passing around
+            simple objects with primitive data types, but it's insufficient if we want to pass complex
+            objects such as class instances, callbacks, etc.</p>
+        <p>This project is a demonstration of a set of techniques for custom serialization and
+            deserialization that supports features such as nested objects, matching class instances,
+            arrays, objects, functions, symbols, and many more.</p>
+        <p>The two different contexts are the browser window (this one), and a Node.js server (the project
+            is running on it). The communication between the server and browser is done via WebSocket, and
+            the communication protocol is a subset of JSONRPC 2.0.</p>
+        <p>On top of this protocol, the project implements a set of predefined messages between the client
+            and server, which aims to preserve the original type of the remote object. This is necessary
+            in a language such as JavaScript, where typing is weak and many different objects are listed under
+            the type of <code>'object'</code>.
+        </p>
+        <p>To demonstrate these features, open the browser's console.</p>
+        <p>Accessing a remote object is done via the global <code>getRemoteObject(remoteObjectName)</code> function.
+            The server contains a hardcoded object called <code>remoteObject</code>, and the full example to call a
+            remote object is:
+            <pre>let remoteObject = await getRemoteObject("remoteObject");</pre>
+            If we print the <code>remoteObject</code> in the console, we will get a list of properties of different
+            types. The following is an explanation of each of them and how they are passed around between contexts.
+        </p>
+        <ul>
+            <li><p><code>fieldA: </code>This field is a <code>string</code> in the original context, therefore it'
+            very easy to reproduce it on this context. The serialization is done directly via <code>JSON.stringify</code>.</p></li>
+            <li><p><code>fieldB: </code>This field is a <code>number</code>. Serialization is also easy, however
+            the client context needs to call <code>parseFloat</code> on it to ensure proper typing.</p></li>
+            <li><p><code>fieldC: </code>This field is a <code>regexp</code>, but calling <code>typeof</code>
+            on it will list it as an <code>object</code>, and running it through <code>JSON.stringify</code> directly
+            will not work. For this reason, before being serialized it's turned into a string via ' <code>toString</code>
+            method. When received by the browser, this string is then recreated into a <code>regexp</code> by adding
+            the string to ' constructor.</p></li>
+            <li><p><code>dateField: </code>This field is a <code>date</code>, but calling <code>typeof</code>
+            on it will list it as an <code>object</code>. A similar process is done here to the <code>regexp</code> above.</p></li>
+            <li><p><code>booleanTrue</code> and <code>booleanFalse: </code>These fields are <code>boolean</code>.
+            Serialization is easy since the JSON format supoorts these types directly.</p></li>
+            <li><p><code>undefinedObj: </code>This field is explicitly <code>undefined</code>, but <code>JSON.stringify</code>
+            would strip this field during serialization. For this reason, the typing is preserved and is recreated on the
+            client context.</p></li>
+            <li><p><code>nullField: </code>Unlike <code>undefined</code>, <code>null</code> is treated as an <code>object</code>.
+            For this reason, a <code>null</code> equality test is done on every object, and if any of them are <code>null</code>, this
+            information is preserved when serializing.</p></li>
+            <li><p><code>someNestedObject: </code>This is an explicit <code>object</code>, and while <code>JSON.stringify</code>
+            supports objects, it will only list the primitive types within. For this reason, every enumerable property in
+            the object is serialized separately, and the result of this serialization is sent to the client. Note that
+            the object may have sub-objects, therefore the serialization is recursive. This allows us to serialize even
+            deeply nested objects with class instances and functions.</p></li>
+            <li><p><code>bigIntField: </code>This is a <code>bigint</code>, and the type is preserved when serializing.
+            To ensure that it's not mixed up with a <code>number</code>, it's first turned into a string via <code>toString</code>
+            and then back using <code>let bigIntField = BigInt(serializedBigInt)</code>.</p></li>
+            <li><p><code>someMethod: </code>One of the more tricky aspects of the project was calling remote functions.
+            Since returned objects may have functions in them, these needed to exist in the deserialized object as well.
+            However, since the remote functions runs on a remote context, we can't take the function itself and pass it
+            to the local context. Instead, a local anonymous function is created, which when called, send its params
+            to the remote context. The remote context then deserializes these params and runs the remote function with
+            them, and then sends the results back to the local context. In both cases, the params and the results
+            need to be serialized using the process described above.<br><br>When we call a remote function in the remote
+            context, it's also important to keep track of who called the remote function so that the result can be sent
+            to the caller. This is done by using <code>Promises</code>. A promise is created for every call to a remote
+            function, and this Promise is resolved when the remote context sends back the results via WebSocket. Each
+            call to a remote function has a callingId, and the remote context will return this callingId along with
+            the results of the remote function. This callingId is mapped to the local Promise, which is resolved when
+            the results are returned.<br><br>A special case is also passing functions as parameters to remote functions.
+            Again, we can't send the function itself, but we send a special string with a function id. The remote context
+            will create a anonymous function which will send the results to the local context via WebSocket. When the message
+            is received in the local context, the function id is matched to the calling function, and the local callback is
+            called with the results from the remote context. In this way a local callback can be called by the remote context.</p></li>
+            <li><p><code>symbolField: </code>Symbols are a special case, since their purpose is to serve as identifiers. For
+            this reason, there needs to be a mapping between local symbols and remote symbols, so that deserialization and
+            serialization produces the same instance. When a remote object serialzes a symbol, an id is generated for it and
+            sent to the local context. The local context will create a symbol of its own with this id embedded. When using
+            this local symbol as an argument for functions, the id is extracted and sent to the remote context instead of
+            the symbol itself. The remote context will then use this id to match its own symbol. A provided function called
+            <code>symbolCheck</code> is provided.</p></li>
+        </ul>
+        <p>
+            Two other global functions are provided, <code>disposeObject</code> and <code>disposeFunction</code>. These functions
+            will remove all mappings between remote and local functions and symbols. The local object will still exist, but it
+            will not be possible to call its methods or use its symbols. In addition, the remote context will also remove all
+            mappings, and new calls to <code>getRemoteObject</code> will be made. Usually, <code>disposeFunction</code> does not
+            need to be called directly, since <code>disposeObject</code> will usually dispose all of its attached methods as well.
+            However, when we call a remote function witch itself returns a callback, this disposal is necessary since the returned
+            callback is not bound to the remote object.
+        </p>
+    </div>
+<script src="/public/js/site.js"></script>
+</body>
+</html>
